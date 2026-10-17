@@ -95,7 +95,12 @@ jobs:
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         set -e
-        lunch twrp_${{ inputs.DEVICE_NAME }}-eng && make clean && mka adbd ${{ inputs.BUILD_TARGET }}image
+        if [ "${{ inputs.MANIFEST_BRANCH }}" = "16.0" ]; then
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-bp1a-eng"
+        else
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-eng"
+        fi
+        lunch $LUNCH_TARGET && make clean && mka adbd ${{ inputs.BUILD_TARGET }}image
 
     - name: Set Release Properties
       run: |
