@@ -126,7 +126,7 @@ jobs:
         export ALLOW_MISSING_DEPENDENCIES=true
         set -e
         if [ "${{ inputs.MANIFEST_BRANCH }}" = "16.0" ]; then
-          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-bp1a-eng"
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-bp2a-eng"
         else
           LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-eng"
         fi
