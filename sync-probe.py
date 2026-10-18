@@ -1,112 +1,74 @@
 #!/usr/bin/env python3
 import os
-import re
 import subprocess
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 WS = Path(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
-PROBE = WS / "probe"
+PROBE = WS / "probe3"
 PROBE.mkdir(exist_ok=True)
-TARGETS = ("external/libarchive", "external/libfuse3", "prebuilts/fox-go")
 
 
-def run(cmd, timeout=300):
+def run(cmd, timeout=600, maxout=14000):
     print(f"\n$ {' '.join(str(c) for c in cmd)}", flush=True)
     try:
         p = subprocess.run([str(c) for c in cmd], timeout=timeout, capture_output=True, text=True)
     except subprocess.TimeoutExpired:
         print("!! TIMEOUT", flush=True)
-        return -1
-    if p.stdout:
-        print(p.stdout[-6000:], flush=True)
+        return ""
+    out = p.stdout or ""
+    if out:
+        print(out[-maxout:], flush=True)
     if p.stderr:
-        print("STDERR:\n" + p.stderr[-8000:], flush=True)
+        print("STDERR:\n" + p.stderr[-maxout:], flush=True)
     print(f"!! exit={p.returncode}", flush=True)
-    return p.returncode
+    return out
 
 
-print("=== environment ===")
-run(["git", "--version"])
-run(["df", "-h", str(WS)])
-
-print("\n=== 1. sync script ===")
-SYNC = PROBE / "sync"
-if not SYNC.exists():
-    run(["git", "clone", "--depth", "1", "https://gitlab.com/OrangeFox/sync.git", str(SYNC)])
-text = (SYNC / "orangefox_sync.sh").read_text(errors="replace")
-lines = text.splitlines()
-for i, line in enumerate(lines, 1):
-    if re.search(r"SCRIPT_VERSION=|repo (sync|init)|^repo_sync\(\)", line):
-        print(f"{i}: {line.rstrip()}")
-print("-- 16.0 flow function --")
-idx = next((i for i, l in enumerate(lines) if re.match(r"^do_fox_16", l)), None)
-if idx is not None:
-    print("\n".join(f"{i + 1}: {l}" for i, l in enumerate(lines[idx:idx + 60], idx)))
-
-print("\n=== 2. manifest ===")
-MAN = PROBE / "manifest"
-if not MAN.exists():
-    rc = run(["git", "clone", "--depth", "1", "-b", "fox_16.0",
-              "https://gitlab.com/OrangeFox/Manifest.git", str(MAN)])
-    if rc != 0:
-        run(["git", "clone", "--depth", "1", "https://gitlab.com/OrangeFox/Manifest.git", str(MAN)])
-
-remotes, default = {}, {}
-projects = []
-for p in sorted(MAN.rglob("*.xml")):
-    try:
-        root = ET.parse(p).getroot()
-    except ET.ParseError as e:
-        print("skip", p, e)
-        continue
-    for el in root.iter():
-        if el.tag == "remote" and el.get("name"):
-            remotes.setdefault(el.get("name"), el.get("fetch"))
-        elif el.tag == "default":
-            default.setdefault("remote", el.get("remote"))
-            default.setdefault("revision", el.get("revision"))
-        elif el.tag == "project" and el.get("name"):
-            projects.append((p.name, el))
-
-print("-- remotes --")
-for k, v in sorted(remotes.items()):
-    print(f"{k} -> {v}")
-print(f"default: remote={default.get('remote')} revision={default.get('revision')}")
-
-found = []
-print("\n-- target entries --")
-for src, el in projects:
-    if el.get("name") in TARGETS or el.get("path") in TARGETS:
-        print(f"[{src}] {ET.tostring(el, encoding='unicode').strip()}")
-        found.append(el)
-if not found:
-    print("NO TARGET ENTRIES FOUND IN MANIFEST")
+def sh(cmd, timeout=300):
+    return run(["bash", "-c", cmd], timeout=timeout)
 
 
-def url_of(el):
-    fetch = el.get("fetch") or remotes.get(el.get("remote") or default.get("remote")) or remotes.get("origin")
-    return f"{fetch.rstrip('/')}/{el.get('name')}"
+print("=== A. upstream OrangeFox Manifest history ===")
+MAN = PROBE / "man"
+if not (MAN / ".git").exists():
+    run(["git", "clone", "https://gitlab.com/OrangeFox/Manifest.git", str(MAN)])
+run(["git", "-C", str(MAN), "log", "--oneline", "-20", "origin/fox_16.0"])
+print("-- sepolicy pin changes in history --")
+sh(f"git -C {MAN} log --oneline -S 'system/sepolicy' origin/fox_16.0 | head -15")
+print("-- eb1e5d7 stat --")
+run(["git", "-C", str(MAN), "show", "--stat", "eb1e5d7"], maxout=6000)
+print("-- eb1e5d7 full diff (small files only) --")
+sh(f"git -C {MAN} show eb1e5d7 -- fox.xml twrp-default.xml | head -120")
+print("-- commits between 4c65ca2 and eb1e5d7 --")
+sh(f"git -C {MAN} log --oneline 4c65ca2..eb1e5d7 2>/dev/null | head -20")
 
+print("\n=== B. system/sepolicy entry in the pinned snapshot (4c65ca2) ===")
+sh(f"git -C {MAN} show 4c65ca2:twrp-default.xml | grep -n -B2 -A2 sepolicy")
+sh(f"git -C {MAN} show 4c65ca2:default.xml | grep -n 'system/sepolicy'")
+sh(f"git -C {MAN} show 4c65ca2:remove-minimal.xml | grep -n 'system/sepolicy'")
+print("-- same grep at eb1e5d7 (upstream head) --")
+sh(f"git -C {MAN} show eb1e5d7:twrp-default.xml 2>/dev/null | grep -n -B2 -A2 sepolicy")
+sh(f"git -C {MAN} show eb1e5d7:default.xml 2>/dev/null | grep -n 'system/sepolicy'")
 
-print("\n=== 3. fetch tests ===")
-for el in found:
-    name = el.get("name")
-    rev = el.get("revision") or default.get("revision")
-    url = url_of(el)
-    print(f"\n### {name} | url={url} | revision={rev}")
-    run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}\n", f"{url}/info/refs?service=git-upload-pack"], timeout=60)
-    d = PROBE / "t" / name.replace("/", "__")
-    if not (d / ".git").exists():
-        run(["git", "init", "-q", str(d)])
-    run(["git", "-C", str(d), "ls-remote", "--symref", url, "HEAD"], timeout=120)
-    if rev and re.fullmatch(r"[0-9a-f]{40}", rev):
-        run(["git", "-C", str(d), "fetch", "--no-tags", url, rev], timeout=600)
-    else:
-        ref = rev if (rev or "").startswith("refs/") else f"refs/heads/{rev or 'HEAD'}"
-        if ref == "refs/heads/HEAD":
-            ref = "HEAD"
-        run(["git", "-C", str(d), "fetch", "--no-tags", "--depth=1", url, f"+{ref}:refs/remotes/probe/deep"], timeout=600)
-        run(["git", "-C", str(d), "fetch", "--no-tags", url, f"+{ref}:refs/remotes/probe/full"], timeout=600)
+print("\n=== C. OrangeFox system/sepolicy fork ===")
+SEP = PROBE / "sep"
+if not (SEP / ".git").exists():
+    run(["git", "clone", "https://gitlab.com/OrangeFox/system/sepolicy.git", str(SEP)], timeout=900)
+run(["git", "-C", str(SEP), "log", "--format=%h %cI %s", "-25", "origin/fox_16.0"], maxout=8000)
+print("-- history of the hwcrypto vendor file --")
+sh(f"git -C {SEP} log --format='%h %cI %s' -- vendor/hal_hwcrypto_default.te | head -15")
+print("-- history of public/attributes around gates --")
+sh(f"git -C {SEP} log --format='%h %cI %s' -5 -- public/attributes")
+print("-- current branch head: does the vendor file exist + gated? --")
+sh(f"git -C {SEP} show origin/fox_16.0:vendor/hal_hwcrypto_default.te 2>&1 | head -20")
+print("-- current head: hwcrypto gates in public/attributes --")
+sh(f"git -C {SEP} show origin/fox_16.0:public/attributes | grep -n -B4 -A8 hwcrypto | head -40")
+
+print("\n=== D. build/release flags for bp1a (AOSP android-16.0.0_r1) ===")
+REL = PROBE / "rel"
+if not (REL / ".git").exists():
+    run(["git", "clone", "--depth", "1", "-b", "android-16.0.0_r1",
+         "https://android.googlesource.com/platform/build/release", str(REL)], timeout=600)
+sh(f"ls {REL}/flag_values/ 2>/dev/null; echo ---; ls {REL}/flag_values/bp1a 2>/dev/null | grep -i board; echo '-- value file if present --'; cat {REL}/flag_values/bp1a/RELEASE_BOARD_API_LEVEL.textproto 2>/dev/null; echo '-- declaration --'; cat {REL}/flag_declarations/RELEASE_BOARD_API_LEVEL.textproto 2>/dev/null")
 
 print("\n=== done ===")
