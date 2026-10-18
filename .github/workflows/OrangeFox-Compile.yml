@@ -79,7 +79,37 @@ jobs:
         git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
         git clone https://gitlab.com/OrangeFox/sync.git -b master
         cd sync
-        ./orangefox_sync.sh --branch ${{ inputs.MANIFEST_BRANCH }} --path ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
+        if [ "${{ inputs.MANIFEST_BRANCH }}" = "16.0" ]; then
+          # Upstream's eb1e5d7 (2026-10-18) fox.xml adds projects anonymous builds
+          # cannot fetch (external/libarchive, external/libfuse3, prebuilts/fox-go)
+          # plus a manifest-level external/rclone. Build from the pinned public-good
+          # snapshot (2026-10-01, 4c65ca2) in pooradrian/Manifest @ fox_16.0 instead.
+          if grep -q "https://gitlab.com/OrangeFox/Manifest.git" orangefox_sync.sh; then
+            sed -i "s#https://gitlab.com/OrangeFox/Manifest.git#https://github.com/pooradrian/Manifest.git#" orangefox_sync.sh
+            grep -n "Manifest.git" orangefox_sync.sh
+          else
+            echo "::error::expected the OrangeFox Manifest URL in orangefox_sync.sh - upstream changed, review manually."
+            exit 1
+          fi
+        fi
+        # Upstream hosts flake with transient errors mid-sync; repo sync resumes
+        # partial checkouts, so re-running the script is a safe resume.
+        attempt=1; max_attempts=4
+        while [ ${attempt} -le ${max_attempts} ]; do
+          echo "Manifest sync attempt ${attempt}/${max_attempts} ..."
+          if ./orangefox_sync.sh --branch ${{ inputs.MANIFEST_BRANCH }} --path ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}; then
+            echo "Manifest sync succeeded on attempt ${attempt}."
+            break
+          fi
+          if [ ${attempt} -eq ${max_attempts} ]; then
+            echo "::error::Manifest sync failed after ${max_attempts} attempts."
+            exit 1
+          fi
+          wait_s=$((attempt * 90))
+          echo "Sync failed, sleeping ${wait_s}s before retry ..."
+          sleep ${wait_s}
+          attempt=$((attempt + 1))
+        done
 
     - name: Clone Device Tree
       run: |
